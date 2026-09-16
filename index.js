@@ -84,7 +84,7 @@ const extractTld = (domain) => {
     if (parts.length < 2) return '';
     if (parts.length >= 3) {
         const multiLevelTld = `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-        if (rdapRegistry.find(e => e.tld === multiLevelTld)) return multiLevelTld;
+        if (rdapRegistry.find(e => e.tld === multiLevelTld) || whoisServers[multiLevelTld]) return multiLevelTld;
     }
     return parts[parts.length - 1];
 };
@@ -155,19 +155,25 @@ const whoisQuery = (server, query, timeout = 12000) => {
 const WHOIS_NOT_FOUND_RE = /(no match for|not found|no entries found|no data found|object does not exist|nothing found|no matching record|status:\s*available|status:\s*free|domain not found|the queried object does not exist|malformed query|invalid query|invalid input)/i;
 
 /** Patterns indicating the WHOIS server refused/limited the query (fallback to RDAP). */
-const WHOIS_DENIED_RE = /(not permitted|access denied|permission denied|quota exceeded|rate limit|query limit|maximum .* queries|exceeded the .*limit|too many requests|blocked for abuse|connection refused by policy)/i;
+const WHOIS_DENIED_RE = /(not permitted|access denied|permission denied|quota exceeded|rate[ -]?limit(?:ed)? (?:exceeded|reached)|(?:exceeded|reached) (?:the )?rate[ -]?limit|query limit exceeded|maximum .* queries|exceeded the .*limit|too many requests|blocked for abuse|connection refused by policy)/i;
 
 const whoisSaysNotFound = (text) => {
     if (!text || !text.trim()) return true;
-    if (WHOIS_DENIED_RE.test(text)) return true;
-    // A real record should contain at least one "Key: value" line
-    if (!/^[ \t]*[\w.\/-]+[ \t]*:[ \t]*\S/m.test(text)) return true;
+
     // Only inspect the first ~30 non-comment lines (avoid false hits in legal footers)
     const head = text.split('\n')
         .filter(l => !/^\s*[%#]/.test(l))
         .slice(0, 30)
         .join('\n');
-    return WHOIS_NOT_FOUND_RE.test(head);
+
+    // A real record should contain a signature like "Domain Name: ..." or at least one "Key: value" line
+    const hasRecordSignature = /^[ \t]*(?:Domain Name|domain|Domain|Registry Domain ID)[ \t]*:[ \t]*\S/im.test(head);
+
+    if (WHOIS_NOT_FOUND_RE.test(head)) return true;
+    if (!hasRecordSignature && WHOIS_DENIED_RE.test(head)) return true;
+    if (!/^[ \t]*[A-Za-z0-9][\w.\/ -]*:[ \t]*\S/m.test(text)) return true;
+
+    return false;
 };
 
 // Cache TLD -> whois server discovered from IANA (per process lifetime)
@@ -248,11 +254,12 @@ const domainWhois = async (domain) => {
         return null;
     }
 
-    // Follow registrar referral (thin registries like .com/.net) for richer data
+    // Follow registrar referral (thin registries like .com/.net) for richer data.
+    // Skip referral for thick registries (e.g. whois.registry.co, whois.co.nl) where registry data is complete.
     const registrarServer = extractRegistrarWhoisServer(registryResp);
-    if (registrarServer && registrarServer !== registryServer) {
+    if (registrarServer && registrarServer !== registryServer && registryServer !== 'whois.registry.co' && registryServer !== 'whois.co.nl') {
         try {
-            const registrarResp = await whoisQuery(registrarServer, domain);
+            const registrarResp = await whoisQuery(registrarServer, domain, 3500);
             if (registrarResp && !whoisSaysNotFound(registrarResp)) {
                 return { text: registrarResp, server: `${registryServer} → ${registrarServer}` };
             }
@@ -313,9 +320,11 @@ const ipWhois = async (ip) => {
 const cleanDomainWhois = (text) => {
     const stopRe = /^\s*(NOTICE:|TERMS OF USE:|By submitting a query|The Registry database contains|For more information on Whois status codes|The data in this|Access to .*WHOIS|% *Terms and Conditions|URL of the ICANN Whois Inaccuracy)/i;
     const out = [];
-    let lastUpdateLine = null;
+    const updateMatch = text.match(/^>>> Last update of.*<<</m);
+    const lastUpdateLine = updateMatch ? updateMatch[0].trim() : null;
+
     for (const line of text.split(/\r?\n/)) {
-        if (/^>>> Last update of/i.test(line.trim())) { lastUpdateLine = line.trim(); continue; }
+        if (/^>>> Last update of/i.test(line.trim())) continue;
         if (stopRe.test(line)) break;
         out.push(line);
     }
@@ -652,8 +661,12 @@ const lookup = async (input, engine = null) => {
         return null;
     }
 
-    // --- Domain: engine override --whois → WHOIS first ---
-    if (engine === 'whois') {
+    const tld = extractTld(target);
+    const tldEntry = rdapRegistry.find(e => e.tld === tld);
+    const isWhoisPreferred = engine === 'whois' || tld === 'co' || tld === 'co.nl' || !tldEntry?.rdapServer;
+
+    // --- Domain: WHOIS first (when engine is 'whois', or for WHOIS-preferred TLDs like .co, .co.nl) ---
+    if (isWhoisPreferred && engine !== 'rdap') {
         try {
             const result = await domainWhois(target);
             if (result) {
@@ -666,8 +679,8 @@ const lookup = async (input, engine = null) => {
         } catch (e) {
             console.error('WHOIS domain lookup error:', e.message);
         }
-        // WHOIS failed → still try RDAP so the user gets something
-        console.log(`--whois failed, falling back to RDAP for: ${target}`);
+        // If WHOIS didn't find anything, try RDAP as fallback
+        console.log(`WHOIS failed, falling back to RDAP for: ${target}`);
         const [json] = await rdapLookup(target);
         if (json) {
             return { raw: formatRdapAsRaw(json), type: 'domain', source: 'RDAP (fallback)' };
@@ -675,7 +688,7 @@ const lookup = async (input, engine = null) => {
         return null;
     }
 
-    // --- Domain: 1. RDAP (primary) ---
+    // --- Domain: 1. RDAP (primary for TLDs with RDAP support) ---
     try {
         const [json] = await rdapLookup(target);
         if (json) {
