@@ -1,170 +1,99 @@
-# id Whois Bot (WHOIS + RDAP Fallback)
+# WhoisBot
 
-A powerful and lightweight Telegram bot for WHOIS lookups with a **hybrid engine**:
+Telegram bot for domain and IP WHOIS lookups using a hybrid RDAP/WHOIS engine:
 
-- **Domains** → **RDAP primary** (HTTPS, structured, firewall-friendly), WHOIS port 43 fallback.
-- **IP addresses** → **WHOIS (RIR, port 43) only** — richest raw records, no RDAP fallback.
-
-Provides structured, clean, and informative data for both domain names and IP addresses.
+- **Domains**: RDAP (HTTPS) primary with WHOIS (TCP 43) fallback.
+- **IP addresses**: Direct RIR WHOIS (TCP 43) with automatic referral chasing.
 
 ## Features
 
-- **Domain lookups via RDAP first**: Resolution order: local `rdap-registry.json` → `rdap.org` bootstrap → live IANA RDAP bootstrap (`data.iana.org/rdap/dns.json`). If all RDAP sources fail, falls back to classic WHOIS:
-  - Registry WHOIS server resolved from a bundled static list (`whois-servers.json`, ~1,450 TLDs from the IANA root zone DB) with longest-suffix matching (`web.id` → `whois.id`); live `whois.iana.org` discovery only for TLDs missing from the list.
-  - Follows `Registrar WHOIS Server:` referrals for registrar-level detail (thin registries like `.com`/`.net`).
-- **IP lookups via WHOIS only (IPv4/IPv6)**: Detects the correct RIR (ARIN, RIPE NCC, APNIC, LACNIC, AFRINIC), queries port 43 directly, and follows inter-RIR referrals automatically. No RDAP fallback — requires outbound TCP port 43 access.
-- **Informative IP Output**: IP lookups return a structured **IP SUMMARY** (network range, CIDR, network name/type, organization, address, country, origin AS, abuse/admin contacts, dates) followed by the full raw RIR record.
-- **Clean Domain Output**: Legal boilerplate/disclaimers are stripped from domain WHOIS responses.
-- **Source Transparency**: Every reply shows which server answered (e.g. `WHOIS (whois.verisign-grs.com → whois.markmonitor.com)` or `RDAP (fallback)`).
-- **Telegram-Safe**: Output automatically truncated to stay within Telegram's 4096-character message limit.
-- **Clean Interface**: Edits the "searching" message in-place to keep chat history tidy.
-- **Configurable**: Customizable welcome message and easy environment setup.
-
-## Lookup Flow
-
-```
-/whois <input>
-    │
-    ├─ IP address? ──► RIR WHOIS (port 43, follows referrals) ──► ok? ──► reply
-    │                       │
-    │                       └─ fail / not found ──► "IP address not found"
-    │
-    └─ Domain? ──► RDAP (registry JSON → rdap.org → IANA bootstrap) ──► ok? ──► reply
-                        │
-                        └─ all RDAP fail ──► WHOIS port 43
-                                (whois-servers.json, longest suffix → registry → registrar referral)
-                                    │
-                                    └─ fails too ──► "Domain not found"
-```
+- **Domain lookups**: Resolves RDAP via local registry, `rdap.org`, and IANA bootstrap. Falls back to port 43 WHOIS using static server mappings (`whois-servers.json`) and follows registrar referrals.
+- **IP lookups**: Routes IPv4/IPv6 to the appropriate RIR (ARIN, RIPE, APNIC, LACNIC, AFRINIC) over port 43, returning a structured summary followed by the raw record.
+- **Telegram friendly**: Strips legal boilerplate, truncates output under 4096 characters, and edits the loading message in-place.
+- **Engine overrides**: Supports `-whois` (force classic WHOIS) and `-rdap` (force RDAP only).
 
 ## Prerequisites
 
-- Node.js (v14 or higher)
-- NPM
-- A Telegram Bot Token from [@BotFather](https://t.me/BotFather)
-- Outbound TCP port 43 access (required for IP lookups and the `-whois` option; domain lookups via RDAP work without it)
+- Node.js 18 or higher
+- Outbound TCP port 43 access (required for WHOIS queries)
+- Telegram Bot Token from [@BotFather](https://t.me/BotFather)
 
-## Installation
+## Setup
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/iqbwl/whoisbot.git
-   cd whoisbot
-   ```
-
-2. Install dependencies:
+1. Install dependencies:
    ```bash
    npm install
    ```
 
-3. Configure environment variables:
-   - Copy `.env.example` to `.env`.
-   - Add your `BOT_TOKEN`.
+2. Configure environment:
+   ```bash
+   cp .env.example .env
+   ```
+   Set your `BOT_TOKEN` in `.env`:
    ```env
    BOT_NAME="id Whois Bot"
    BOT_TOKEN=your_token_here
    START_MESSAGE="Welcome to {BOT_NAME} - RDAP Lookup Utility"
    ```
 
-## Usage
+3. Run:
+   ```bash
+   # Direct
+   node index.js
 
-Start the bot:
+   # Production (PM2)
+   pm2 start index.js --name whoisbot
+   ```
+
+## Testing
+
+Run unit tests via Node's native test runner:
+
 ```bash
-node index.js
+npm test
 ```
 
-### Running with PM2 (recommended for production)
+## Telegram Usage
 
-```bash
-cd whoisbot
-npm install
+- `/start`: Display welcome message.
+- `/whois <domain or ip>`: Perform lookup.
+- `/whois`: Display usage guide.
 
-# start
-pm2 start index.js --name whoisbot
+Flags (domains only):
+- `/whois example.com -whois` - Query port 43 directly, skipping RDAP.
+- `/whois example.com -rdap` - Query RDAP only, no WHOIS fallback.
 
-# auto-start on server reboot
-pm2 startup   # run the command it prints
-pm2 save
+## Project Structure
+
+```
+├── rdap-registry.json    # Static RDAP endpoint mappings
+├── whois-servers.json    # Static TLD -> WHOIS server mappings
+├── src/
+│   ├── bot/              # Telegram bot instance and command handlers
+│   ├── config/           # Environment config, constants, data loader (Map O(1))
+│   ├── formatters/       # Response cleaners for domain & IP output
+│   ├── services/         # TCP WHOIS client, RDAP client, lookup orchestrator
+│   └── utils/            # Normalization, IP validation, MarkdownV2 helpers
+├── tests/                # Unit tests (node:test)
+├── index.js              # Application entry point & exports
+└── package.json
 ```
 
-Day-to-day commands:
+## Module API
 
-| Command | Description |
-|---|---|
-| `pm2 status` | Show process status |
-| `pm2 logs whoisbot` | Tail logs |
-| `pm2 restart whoisbot` | Restart (after editing code or `.env`) |
-| `pm2 stop whoisbot` | Stop |
-| `pm2 delete whoisbot` | Remove from PM2 |
+The lookup engine can also be imported as a library:
 
-Optional `ecosystem.config.js` for a tidier setup:
-
-```js
-module.exports = {
-  apps: [{
-    name: 'whoisbot',
-    script: 'index.js',
-    cwd: __dirname,
-    autorestart: true,
-    max_memory_restart: '200M',
-    env: { NODE_ENV: 'production' }
-  }]
-};
-```
-
-Then: `pm2 start ecosystem.config.js && pm2 save`.
-
-> `.env` is loaded automatically via `dotenv` since PM2 runs from the project directory. After editing `.env`, just `pm2 restart whoisbot`.
-
-Commands in Telegram:
-- `/start`: Show the welcome message.
-- `/whois <domain or ip>`: Perform a lookup (domains: RDAP → WHOIS fallback; IPs: WHOIS only).
-- `/whois` (no argument): Show the usage guide with all options.
-
-Engine options (domains only):
-- `-whois`: Query classic WHOIS (port 43) directly, skipping RDAP. Useful when RDAP data is stale (common with some registries, e.g. `.id` extensions). Falls back to RDAP if WHOIS fails.
-- `-rdap`: Query RDAP only, with no WHOIS fallback.
-
-> Single-dash flags are used because Telegram often auto-converts `--` into an em-dash (`—`). The bot still accepts `--whois`/`--rdap` and even `—whois`/`—rdap` for robustness.
-
-For IP addresses these flags are ignored (IPs always use WHOIS via the RIR).
-
-Example:
-- `/whois google.com`
-- `/whois pandi.id -whois`
-- `/whois example.com -rdap`
-- `/whois 8.8.8.8`
-- `/whois 2606:4700:4700::1111`
-
-## Using in Groups
-
-The bot works in group chats out of the box — just invite it as a regular member (no admin rights needed).
-
-- Responds to both `/whois <target>` and `/whois@YourBotName <target>` (Telegram appends `@botname` automatically when there are multiple bots in a group).
-- Every reply is sent as a **reply to the requester's message**, so it's always clear who asked — the result header also greets the requester by first name.
-- The "searching…" message is **edited in-place** into the final result, keeping group history clean (no double messages).
-- Multiple members can query simultaneously; each request is processed independently.
-
-**Privacy Mode**: keep BotFather's *Group Privacy* **enabled** (the default). The bot only needs `/command` messages, which are always delivered regardless of privacy mode — regular group chatter never reaches the bot. If you change the privacy setting while the bot is already in a group, kick and re-invite it for the change to take effect.
-
-**Rate limits**: Telegram allows a bot roughly 20 messages/minute per group. Very busy groups may see slightly delayed responses.
-
-## Development
-
-The bot uses the following main components:
-- `Telegraf`: Telegram Bot Framework.
-- `net` (Node.js built-in): Raw WHOIS queries over TCP port 43.
-- `Axios`: For RDAP API requests (fallback path).
-- `whois-servers.json`: Static TLD → WHOIS server map (primary path; includes second-level zones like `web.id`, `co.uk`).
-- `rdap-registry.json`: RDAP server mapping for specific TLDs (fallback path).
-
-The lookup engine is exported for testing:
 ```js
 const { lookup } = require('./index.js');
-const result = await lookup('google.com');           // default: RDAP → WHOIS fallback
-const result2 = await lookup('pandi.id', 'whois');   // force WHOIS engine
-const result3 = await lookup('example.com', 'rdap'); // RDAP only
-// result = { raw, type: 'domain'|'ip', source }
+
+// Default: RDAP -> WHOIS fallback
+const res1 = await lookup('google.com');
+
+// Force WHOIS engine
+const res2 = await lookup('pandi.id', 'whois');
+
+// IP lookup (WHOIS via RIR)
+const res3 = await lookup('1.1.1.1');
 ```
 
 ## License
