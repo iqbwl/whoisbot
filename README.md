@@ -98,4 +98,4 @@ const res3 = await lookup('1.1.1.1');
 
 ## License
 
-MIT
+This project is open-source and available under the terms of the [MIT License](LICENSE).
